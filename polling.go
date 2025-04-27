@@ -133,7 +133,14 @@ Example:
     }
 */
 func (p *Poller) Poll(timeout time.Duration) ([]Polled, error) {
-	return p.poll(timeout, false)
+	return p.poll(timeout, false, make([]Polled, 0, len(p.items)))
+}
+
+// Poll2 is like Poll but appends into a user-supplied slice, allowing the
+// caller to re-use the same slice rather than allocating one for each Poll
+// call.
+func (p *Poller) Poll2(timeout time.Duration, lst []Polled) ([]Polled, error) {
+	return p.poll(timeout, false, lst)
 }
 
 /*
@@ -147,12 +154,10 @@ to see if there was actually an event.
 When error is not nil, the return list contains no sockets.
 */
 func (p *Poller) PollAll(timeout time.Duration) ([]Polled, error) {
-	return p.poll(timeout, true)
+	return p.poll(timeout, true, make([]Polled, 0, len(p.items)))
 }
 
-func (p *Poller) poll(timeout time.Duration, all bool) ([]Polled, error) {
-	lst := make([]Polled, 0, len(p.items))
-
+func (p *Poller) poll(timeout time.Duration, all bool, lst []Polled) ([]Polled, error) {
 	if len(p.items) == 0 {
 		return lst, nil
 	}
