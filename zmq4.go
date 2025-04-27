@@ -69,7 +69,9 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -1094,6 +1096,65 @@ func (soc *Socket) RecvBytes(flags Flag) ([]byte, error) {
 	data := make([]byte, int(size))
 	C.zmq4_memcpy(unsafe.Pointer(&data[0]), C.zmq_msg_data(&msg), C.size_t(size))
 	return data, nil
+}
+
+// zmqMsgPool is a pool of zmq_msg_t objects to reduce allocations in
+// RecvBytes2.
+var zmqMsgPool = sync.Pool{
+	New: func() any {
+		var msg C.zmq_msg_t
+		return &msg
+	},
+}
+
+// getZmqMsg returns an initialised zmq_msg_t object from the pool.
+func getZmqMsg() *C.zmq_msg_t {
+	msg := zmqMsgPool.Get().(*C.zmq_msg_t)
+	C.zmq_msg_init(msg)
+	return msg
+}
+
+// putZmqMsg closes the given zmq_msg_t and adds it to the pool.
+func putZmqMsg(msg *C.zmq_msg_t) {
+	C.zmq_msg_close(msg)
+	zmqMsgPool.Put(msg)
+}
+
+// RecvBytes2 is like RecvBytes but with reduced allocations:
+//
+//   - receives into a caller supplied byte slice rather than allocating a byte
+//     slice per call (allowing the caller to re-use the same byte slice)
+//   - re-uses previously allocated zmq_msg_t objects from a sync.Pool
+//   - returns a bool indicating whether there are more message parts to
+//     receive by calling zmq_msg_more (rather than expecting the caller
+//     to subsequently call GetRcvmore(), which allocates)
+func (soc *Socket) RecvBytes2(flags Flag, data []byte) ([]byte, bool, error) {
+	if !soc.opened {
+		return nil, false, ErrorSocketClosed
+	}
+	msg := getZmqMsg()
+	defer putZmqMsg(msg)
+
+	var size C.int
+	var err error
+	for {
+		size, err = C.zmq4_msg_recv(msg, soc.soc, C.int(flags))
+		if size >= 0 || !soc.ctx.retry(err) {
+			break
+		}
+	}
+	if size < 0 {
+		return nil, false, errget(err)
+	}
+	if size == 0 {
+		return data, false, nil
+	}
+	// make sure the slice has enough capacity, and then re-slice it to the
+	// size of the message part
+	data = slices.Grow(data, int(size))[:int(size)]
+
+	C.zmq4_memcpy(unsafe.Pointer(&data[0]), C.zmq_msg_data(msg), C.size_t(size))
+	return data, C.zmq_msg_more(msg) == 1, nil
 }
 
 /*
